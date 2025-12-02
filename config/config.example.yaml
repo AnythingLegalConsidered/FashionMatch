@@ -1,0 +1,53 @@
+# FashionMatch - Configuration Template
+# Copy this file to config.yaml and adjust values as needed
+
+# Application Settings
+app:
+  name: "FashionMatch"
+  version: "0.1.0"
+  debug: false
+
+# Model Configuration
+models:
+  device: "cuda"  # or "cpu"
+  clip:
+    model_name: "ViT-B/32"
+    embedding_dim: 512
+  dino:
+    model_name: "dinov2_vits14"
+    embedding_dim: 384
+  fusion:
+    strategy: "weighted_average"
+    weights:
+      clip: 0.5
+      dino: 0.5
+
+# Scraper Configuration
+scraper:
+  base_url: "https://www.vinted.fr"
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  max_pages_per_category: 10
+  request_delay:
+    min_seconds: 1.0
+    max_seconds: 3.0
+  timeout_seconds: 30
+  headless: true
+
+# Database Configuration
+database:
+  provider: "chroma"
+  chroma:
+    persist_directory: "./data/chroma"
+    collection_name: "clothing_items"
+
+# Image Processing
+images:
+  max_size: [224, 224]
+  normalize: true
+  cache_dir: "./data/scraped/images"
+
+# UI Configuration
+ui:
+  items_per_page: 20
+  show_scores: true
+  theme: "light"
