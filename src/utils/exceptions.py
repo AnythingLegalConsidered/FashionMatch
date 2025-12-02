@@ -393,6 +393,29 @@ class EmbeddingError(EncoderError):
         super().__init__(message, code="EMBEDDING_ERROR", **kwargs)
 
 
+class EncodingError(EncoderError):
+    """
+    Raised when the encoding process fails.
+    
+    Example:
+        >>> raise EncodingError(
+        ...     "Failed to encode image with CLIP",
+        ...     model_name="ViT-B/32"
+        ... )
+    """
+
+    def __init__(
+        self,
+        message: str = "Failed to encode",
+        model_name: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        context = kwargs.pop("context", {})
+        if model_name:
+            context["model_name"] = model_name
+        super().__init__(message, code="ENCODING_ERROR", context=context, **kwargs)
+
+
 # ============================================
 # Database Errors
 # ============================================
