@@ -6,27 +6,28 @@ Provides:
 - BaseEncoder: Abstract base class for all encoders
 - CLIPEncoder: OpenAI CLIP encoder for semantic embeddings
 - DINOEncoder: Meta DINOv2 encoder for structural embeddings
+- HybridEncoder: Orchestrates both encoders for combined embeddings
+- HybridEmbedding: Dataclass containing both embedding types
 
 Example:
-    >>> from src.core.encoders import CLIPEncoder, DINOEncoder
+    >>> from src.core.encoders import HybridEncoder
     >>> 
-    >>> # CLIP for semantic understanding
-    >>> clip = CLIPEncoder()
-    >>> clip.load_model()
-    >>> semantic_emb = clip.encode("image.jpg")  # (512,)
-    >>> 
-    >>> # DINO for structural features
-    >>> dino = DINOEncoder()
-    >>> dino.load_model()
-    >>> structural_emb = dino.encode("image.jpg")  # (384,)
+    >>> # Use hybrid encoder for combined CLIP + DINO
+    >>> with HybridEncoder() as encoder:
+    ...     result = encoder.encode_all("image.jpg")
+    ...     print(result.clip_embedding.shape)  # (512,)
+    ...     print(result.dino_embedding.shape)  # (384,)
 """
 
 from .base_encoder import BaseEncoder
 from .clip_encoder import CLIPEncoder
 from .dino_encoder import DINOEncoder
+from .hybrid_encoder import HybridEmbedding, HybridEncoder
 
 __all__ = [
     "BaseEncoder",
     "CLIPEncoder",
     "DINOEncoder",
+    "HybridEncoder",
+    "HybridEmbedding",
 ]
