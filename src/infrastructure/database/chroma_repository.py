@@ -934,3 +934,190 @@ class ChromaRepository(RepositoryInterface):
             f"items={self.count()}, "
             f"path={self._persist_directory})"
         )
+
+    # =========================================
+    # User References Management (Tâche 5.2)
+    # =========================================
+    
+    # Collection names for user references
+    USER_REF_CLIP_COLLECTION = "user_references_clip"
+    USER_REF_DINO_COLLECTION = "user_references_dino"
+    
+    def _get_ref_clip_collection(self):
+        """Get or create CLIP collection for user references."""
+        name = f"{self._collection_prefix}{self.USER_REF_CLIP_COLLECTION}"
+        return self._client.get_or_create_collection(
+            name=name,
+            metadata={
+                "hnsw:space": DISTANCE_FUNCTION,
+                "embedding_dim": CLIP_EMBEDDING_DIM,
+                "description": "User reference CLIP embeddings",
+            },
+        )
+    
+    def _get_ref_dino_collection(self):
+        """Get or create DINO collection for user references."""
+        name = f"{self._collection_prefix}{self.USER_REF_DINO_COLLECTION}"
+        return self._client.get_or_create_collection(
+            name=name,
+            metadata={
+                "hnsw:space": DISTANCE_FUNCTION,
+                "embedding_dim": DINO_EMBEDDING_DIM,
+                "description": "User reference DINO embeddings",
+            },
+        )
+    
+    def add_reference(
+        self,
+        reference_id: str,
+        clip_embedding: List[float],
+        dino_embedding: List[float],
+        metadata: Dict[str, Any],
+    ) -> str:
+        """
+        Add a user reference image with its embeddings.
+        
+        Args:
+            reference_id: Unique ID for the reference.
+            clip_embedding: CLIP embedding vector (512d).
+            dino_embedding: DINO embedding vector (384d).
+            metadata: Reference metadata (name, category, tags).
+            
+        Returns:
+            The reference ID.
+            
+        Raises:
+            EmbeddingMismatchError: If embedding dimensions are wrong.
+            DatabaseError: If storage fails.
+        """
+        # Validate dimensions
+        if len(clip_embedding) != CLIP_EMBEDDING_DIM:
+            raise EmbeddingMismatchError(
+                f"CLIP embedding dimension mismatch",
+                expected=CLIP_EMBEDDING_DIM,
+                actual=len(clip_embedding),
+            )
+        
+        if len(dino_embedding) != DINO_EMBEDDING_DIM:
+            raise EmbeddingMismatchError(
+                f"DINO embedding dimension mismatch",
+                expected=DINO_EMBEDDING_DIM,
+                actual=len(dino_embedding),
+            )
+        
+        # Sanitize metadata
+        safe_metadata = {k: _sanitize_value(v) for k, v in metadata.items()}
+        safe_metadata["added_at"] = datetime.utcnow().isoformat()
+        
+        document = safe_metadata.get("name", reference_id)
+        
+        try:
+            # Add to CLIP reference collection
+            ref_clip = self._get_ref_clip_collection()
+            ref_clip.upsert(
+                ids=[reference_id],
+                embeddings=[clip_embedding],
+                metadatas=[safe_metadata],
+                documents=[document],
+            )
+            
+            # Add to DINO reference collection
+            ref_dino = self._get_ref_dino_collection()
+            ref_dino.upsert(
+                ids=[reference_id],
+                embeddings=[dino_embedding],
+                metadatas=[safe_metadata],
+                documents=[document],
+            )
+            
+            logger.info(f"Reference '{reference_id}' added to user profile")
+            return reference_id
+            
+        except Exception as e:
+            logger.error(f"Failed to add reference {reference_id}: {e}")
+            raise DatabaseError(f"Failed to add reference: {e}")
+    
+    def get_all_references(self) -> List[Dict[str, Any]]:
+        """
+        Get all user reference images metadata.
+        
+        Returns:
+            List of reference metadata dictionaries.
+        """
+        try:
+            ref_clip = self._get_ref_clip_collection()
+            result = ref_clip.get(include=["metadatas", "documents"])
+            
+            references = []
+            for i, ref_id in enumerate(result["ids"]):
+                ref = {
+                    "id": ref_id,
+                    **result["metadatas"][i],
+                    "document": result["documents"][i] if result["documents"] else "",
+                }
+                references.append(ref)
+            
+            return references
+            
+        except Exception as e:
+            logger.error(f"Failed to get references: {e}")
+            return []
+    
+    def get_reference_count(self) -> int:
+        """Get the number of user references."""
+        try:
+            ref_clip = self._get_ref_clip_collection()
+            return ref_clip.count()
+        except Exception:
+            return 0
+    
+    def clear_references(self) -> None:
+        """
+        Clear all user references from both collections.
+        
+        Raises:
+            DatabaseError: If clearing fails.
+        """
+        try:
+            clip_name = f"{self._collection_prefix}{self.USER_REF_CLIP_COLLECTION}"
+            dino_name = f"{self._collection_prefix}{self.USER_REF_DINO_COLLECTION}"
+            
+            # Delete and recreate collections
+            try:
+                self._client.delete_collection(clip_name)
+            except ValueError:
+                pass  # Collection doesn't exist
+            
+            try:
+                self._client.delete_collection(dino_name)
+            except ValueError:
+                pass  # Collection doesn't exist
+            
+            logger.info("User references cleared")
+            
+        except Exception as e:
+            logger.error(f"Failed to clear references: {e}")
+            raise DatabaseError(f"Failed to clear references: {e}")
+    
+    def get_reference_embeddings(self) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        Get all reference embeddings for computing user preference vector.
+        
+        Returns:
+            Tuple of (clip_embeddings, dino_embeddings) lists.
+        """
+        try:
+            ref_clip = self._get_ref_clip_collection()
+            ref_dino = self._get_ref_dino_collection()
+            
+            clip_result = ref_clip.get(include=["embeddings"])
+            dino_result = ref_dino.get(include=["embeddings"])
+            
+            clip_embeddings = clip_result.get("embeddings", []) or []
+            dino_embeddings = dino_result.get("embeddings", []) or []
+            
+            return clip_embeddings, dino_embeddings
+            
+        except Exception as e:
+            logger.error(f"Failed to get reference embeddings: {e}")
+            return [], []
