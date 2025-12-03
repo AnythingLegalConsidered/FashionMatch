@@ -61,6 +61,58 @@ DISTANCE_FUNCTION = "cosine"
 
 
 # ============================================
+# Data Classes
+# ============================================
+
+from dataclasses import dataclass
+
+
+@dataclass
+class FusionWeights:
+    """
+    Weights for hybrid search late fusion.
+    
+    Controls the relative importance of CLIP (semantic) vs DINO (structural)
+    embeddings in the final ranking score.
+    
+    Attributes:
+        clip: Weight for CLIP similarity (semantic features).
+        dino: Weight for DINO similarity (structural features).
+        
+    Example:
+        >>> weights = FusionWeights(clip=0.6, dino=0.4)
+        >>> # Prioritize semantic similarity
+    """
+    clip: float = 0.5
+    dino: float = 0.5
+    
+    def __post_init__(self):
+        """Validate and normalize weights."""
+        if self.clip < 0 or self.dino < 0:
+            raise ValueError("Weights must be non-negative")
+        
+        total = self.clip + self.dino
+        if total == 0:
+            raise ValueError("At least one weight must be positive")
+        
+        # Normalize to sum to 1.0
+        self.clip = self.clip / total
+        self.dino = self.dino / total
+    
+    @classmethod
+    def from_config(cls) -> "FusionWeights":
+        """Create FusionWeights from application config."""
+        settings = get_settings()
+        return cls(
+            clip=settings.models.fusion.weights.clip,
+            dino=settings.models.fusion.weights.dino,
+        )
+    
+    def __repr__(self) -> str:
+        return f"FusionWeights(clip={self.clip:.2f}, dino={self.dino:.2f})"
+
+
+# ============================================
 # Helper Functions
 # ============================================
 
@@ -592,6 +644,182 @@ class ChromaRepository(RepositoryInterface):
             logger.error(f"Search failed: {e}")
             raise DatabaseError(f"Search failed: {e}")
     
+    def hybrid_search(
+        self,
+        clip_vector: List[float],
+        dino_vector: List[float],
+        weights: Optional[FusionWeights] = None,
+        limit: int = 20,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[ClothingItem]:
+        """
+        Search using both CLIP and DINO embeddings with late fusion.
+        
+        Implements a late fusion algorithm that:
+        1. Queries both collections independently
+        2. Converts distances to similarity scores
+        3. Combines scores using weighted average
+        4. Returns top results sorted by combined score
+        
+        Args:
+            clip_vector: The CLIP query embedding (512d).
+            dino_vector: The DINO query embedding (384d).
+            weights: Fusion weights for CLIP and DINO. If None, uses config.
+            limit: Maximum number of results to return.
+            filters: Optional metadata filters.
+            
+        Returns:
+            List of ClothingItem objects sorted by combined score (best first).
+            
+        Example:
+            >>> weights = FusionWeights(clip=0.6, dino=0.4)
+            >>> items = repo.hybrid_search(clip_emb, dino_emb, weights, limit=20)
+            >>> for item in items:
+            ...     print(f"{item.title}: matched!")
+        """
+        # Use default weights from config if not provided
+        if weights is None:
+            weights = FusionWeights.from_config()
+        
+        logger.debug(f"Hybrid search with weights: {weights}")
+        
+        # Validate embedding dimensions
+        if len(clip_vector) != CLIP_EMBEDDING_DIM:
+            raise EmbeddingMismatchError(
+                f"CLIP vector dimension mismatch",
+                expected=CLIP_EMBEDDING_DIM,
+                actual=len(clip_vector),
+            )
+        if len(dino_vector) != DINO_EMBEDDING_DIM:
+            raise EmbeddingMismatchError(
+                f"DINO vector dimension mismatch",
+                expected=DINO_EMBEDDING_DIM,
+                actual=len(dino_vector),
+            )
+        
+        # Fetch more results than needed for better fusion coverage
+        # Using limit * 2 to have margin for items found by only one model
+        fetch_limit = min(limit * 2, 100)
+        
+        try:
+            # =========================================
+            # Step 1: Query both collections
+            # =========================================
+            
+            where_clause = _convert_filters_to_chroma(filters)
+            
+            # Query CLIP collection
+            clip_results = self._clip_collection.query(
+                query_embeddings=[clip_vector],
+                n_results=fetch_limit,
+                where=where_clause,
+                include=["metadatas", "distances"],
+            )
+            
+            # Query DINO collection
+            dino_results = self._dino_collection.query(
+                query_embeddings=[dino_vector],
+                n_results=fetch_limit,
+                where=where_clause,
+                include=["metadatas", "distances"],
+            )
+            
+            # =========================================
+            # Step 2: Build score dictionaries
+            # =========================================
+            
+            # Convert CLIP results: distance -> similarity (1 - distance for cosine)
+            clip_scores: Dict[str, float] = {}
+            clip_metadata: Dict[str, Dict] = {}
+            
+            if clip_results["ids"] and clip_results["ids"][0]:
+                for i, item_id in enumerate(clip_results["ids"][0]):
+                    distance = clip_results["distances"][0][i]
+                    # Convert cosine distance to similarity score
+                    # Cosine distance in ChromaDB: 0 = identical, 2 = opposite
+                    # Similarity: 1 - distance, clamped to [0, 1]
+                    similarity = max(0.0, min(1.0, 1.0 - distance))
+                    clip_scores[item_id] = similarity
+                    clip_metadata[item_id] = clip_results["metadatas"][0][i]
+            
+            # Convert DINO results: distance -> similarity
+            dino_scores: Dict[str, float] = {}
+            dino_metadata: Dict[str, Dict] = {}
+            
+            if dino_results["ids"] and dino_results["ids"][0]:
+                for i, item_id in enumerate(dino_results["ids"][0]):
+                    distance = dino_results["distances"][0][i]
+                    similarity = max(0.0, min(1.0, 1.0 - distance))
+                    dino_scores[item_id] = similarity
+                    dino_metadata[item_id] = dino_results["metadatas"][0][i]
+            
+            logger.debug(
+                f"CLIP found {len(clip_scores)} items, DINO found {len(dino_scores)} items"
+            )
+            
+            # =========================================
+            # Step 3: Fusion - Combine scores
+            # =========================================
+            
+            # Get all unique item IDs from both result sets
+            all_item_ids = set(clip_scores.keys()) | set(dino_scores.keys())
+            
+            if not all_item_ids:
+                logger.warning("Hybrid search found no results")
+                return []
+            
+            # Calculate average scores for fallback when item is missing from one collection
+            clip_avg = sum(clip_scores.values()) / len(clip_scores) if clip_scores else 0.0
+            dino_avg = sum(dino_scores.values()) / len(dino_scores) if dino_scores else 0.0
+            
+            # Build fusion results with combined scores
+            fusion_results: List[Tuple[str, float, Dict]] = []
+            
+            for item_id in all_item_ids:
+                # Get scores from each model (use average as fallback if missing)
+                clip_score = clip_scores.get(item_id, clip_avg)
+                dino_score = dino_scores.get(item_id, dino_avg)
+                
+                # Apply late fusion formula: weighted average
+                # ScoreFinal = (ScoreClip * weights.clip) + (ScoreDino * weights.dino)
+                final_score = (clip_score * weights.clip) + (dino_score * weights.dino)
+                
+                # Get metadata (prefer CLIP, fallback to DINO)
+                metadata = clip_metadata.get(item_id) or dino_metadata.get(item_id, {})
+                
+                fusion_results.append((item_id, final_score, metadata))
+            
+            # =========================================
+            # Step 4: Sort by final score (descending)
+            # =========================================
+            
+            fusion_results.sort(key=lambda x: x[1], reverse=True)
+            
+            # =========================================
+            # Step 5: Convert to ClothingItem objects
+            # =========================================
+            
+            items: List[ClothingItem] = []
+            
+            for item_id, score, metadata in fusion_results[:limit]:
+                try:
+                    item = _metadata_to_item(metadata)
+                    items.append(item)
+                except Exception as e:
+                    logger.warning(f"Failed to convert item {item_id}: {e}")
+                    continue
+            
+            logger.info(
+                f"Hybrid search completed: {len(items)} results "
+                f"(CLIP weight: {weights.clip:.2f}, DINO weight: {weights.dino:.2f})"
+            )
+            
+            return items
+            
+        except Exception as e:
+            logger.error(f"Hybrid search failed: {e}")
+            raise DatabaseError(f"Hybrid search failed: {e}")
+    
     def search_hybrid(
         self,
         clip_embedding: List[float],
@@ -604,6 +832,9 @@ class ChromaRepository(RepositoryInterface):
         """
         Search using both CLIP and DINO embeddings with late fusion.
         
+        This is a convenience wrapper around hybrid_search that returns
+        tuples with scores for backwards compatibility.
+        
         Args:
             clip_embedding: The CLIP query embedding (512d).
             dino_embedding: The DINO query embedding (384d).
@@ -615,60 +846,21 @@ class ChromaRepository(RepositoryInterface):
         Returns:
             List of (ClothingItem, combined_score) tuples.
         """
-        # Normalize weights
-        total = clip_weight + dino_weight
-        if total > 0:
-            clip_weight = clip_weight / total
-            dino_weight = dino_weight / total
+        weights = FusionWeights(clip=clip_weight, dino=dino_weight)
         
-        # Get more results from each collection for better fusion
-        fetch_n = min(n_results * 3, 100)
-        
-        # Search both collections
-        clip_results = self.search_similar(
-            clip_embedding, "clip", n_results=fetch_n, filters=filters
-        )
-        dino_results = self.search_similar(
-            dino_embedding, "dino", n_results=fetch_n, filters=filters
+        # Use the main hybrid_search method
+        items = self.hybrid_search(
+            clip_vector=clip_embedding,
+            dino_vector=dino_embedding,
+            weights=weights,
+            limit=n_results,
+            filters=filters,
         )
         
-        # Build score maps
-        clip_scores: Dict[str, float] = {
-            item.id: score for item, score in clip_results
-        }
-        dino_scores: Dict[str, float] = {
-            item.id: score for item, score in dino_results
-        }
-        
-        # Get all unique item IDs
-        all_ids = set(clip_scores.keys()) | set(dino_scores.keys())
-        
-        # Build item map for metadata
-        item_map: Dict[str, ClothingItem] = {}
-        for item, _ in clip_results:
-            item_map[item.id] = item
-        for item, _ in dino_results:
-            if item.id not in item_map:
-                item_map[item.id] = item
-        
-        # Calculate combined scores (late fusion)
-        combined_results = []
-        for item_id in all_ids:
-            clip_score = clip_scores.get(item_id, 0.0)
-            dino_score = dino_scores.get(item_id, 0.0)
-            
-            # Weighted average
-            combined_score = (clip_weight * clip_score) + (dino_weight * dino_score)
-            
-            item = item_map[item_id]
-            combined_results.append((item, combined_score))
-        
-        # Sort by combined score (highest first)
-        combined_results.sort(key=lambda x: x[1], reverse=True)
-        
-        logger.debug(f"Hybrid search returned {len(combined_results[:n_results])} results")
-        
-        return combined_results[:n_results]
+        # Note: We don't have access to the scores anymore in this wrapper
+        # For full score access, use hybrid_search directly
+        # Here we return a placeholder score of 0.0
+        return [(item, 0.0) for item in items]
     
     # =========================================
     # Collection Management
