@@ -1,0 +1,30 @@
+# Test configuration for FashionMatch
+# Uses smaller models and in-memory storage for faster tests
+
+models:
+  clip_model: "openai/clip-vit-base-patch32"  # Smallest CLIP model
+  dino_model: "dinov2_vits14"  # Smallest DINOv2 model
+  fusion_weights:
+    clip: 0.6
+    dino: 0.4
+  device: "cpu"  # CPU-only for CI/CD compatibility
+
+scraper:
+  base_url: "https://www.vinted.fr"
+  delay_range: [0.1, 0.5]  # Faster delays for testing
+  max_retries: 2
+  timeout: 5
+  headless: true
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+database:
+  persist_directory: ":memory:"  # In-memory for speed
+  collection_name: "test_fashion_items"
+  batch_size: 16  # Smaller batches
+  distance_metric: "cosine"
+
+data_dir: "./test_data"
+references_dir: "./test_data/references"
+scraped_dir: "./test_data/scraped"
+log_level: "DEBUG"

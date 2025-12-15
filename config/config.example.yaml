@@ -1,0 +1,73 @@
+# Model Configuration
+models:
+  # CLIP model variant
+  # Options: "ViT-B/32" (fastest), "ViT-B/16" (balanced), "ViT-L/14" (best quality)
+  clip_model: "ViT-B/32"
+  
+  # DINOv2 model variant
+  # Options: "dinov2_vits14" (small/fast), "dinov2_vitb14" (base), 
+  #          "dinov2_vitl14" (large), "dinov2_vitg14" (giant/best)
+  dino_model: "dinov2_vits14"
+  
+  # Late fusion weights for combining embeddings (must sum to 1.0)
+  fusion_weights:
+    clip: 0.5  # Weight for CLIP semantic understanding
+    dino: 0.5  # Weight for DINOv2 structural analysis
+  
+  # Device selection: "cuda" (GPU), "cpu", or "auto" (automatically detect GPU)
+  device: "auto"
+
+# Web Scraper Configuration
+scraper:
+  # Base URL for Vinted France
+  base_url: "https://www.vinted.fr"
+  
+  # Maximum number of pages to scrape per search
+  max_pages: 10
+  
+  # Random delay range between requests (seconds) - helps avoid rate limiting
+  # Format: [min_delay, max_delay]
+  delay_range: [1.0, 3.0]
+  
+  # Timeout for page load operations (seconds)
+  timeout: 30
+  
+  # Run browser in headless mode (no visible window)
+  headless: true
+  
+  # User agent strings for rotation (helps avoid detection)
+  # At least one user agent is required
+  # Add multiple user agents to rotate between requests
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Database Configuration
+database:
+  # Directory where ChromaDB will persist its data
+  persist_directory: "./data/chroma"
+  
+  # Name of the ChromaDB collection for storing embeddings
+  collection_name: "vinted_items"
+  
+  # Batch size for inserting embeddings into ChromaDB
+  batch_size: 100
+  
+  # Distance metric for similarity search
+  # Options: "cosine" (cosine similarity, recommended for embeddings),
+  #          "l2" (Euclidean distance), "ip" (inner product)
+  distance_metric: "cosine"
+
+# Application Settings
+# Root directory for all data files
+data_dir: "./data"
+
+# Directory for user-provided reference images (query images)
+references_dir: "./data/references"
+
+# Directory for scraped product images from Vinted
+scraped_dir: "./data/scraped"
+
+# Logging level: DEBUG (verbose), INFO (normal), WARNING (important), ERROR (errors only)
+log_level: "INFO"
